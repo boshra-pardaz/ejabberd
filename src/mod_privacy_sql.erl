@@ -24,7 +24,6 @@
 
 -module(mod_privacy_sql).
 
--compile([{parse_transform, ejabberd_sql_pt}]).
 
 -behaviour(mod_privacy).
 
@@ -92,7 +91,7 @@ set_lists(#privacy{us = {LUser, LServer},
 		lists:foreach(
 		  fun({Name, List}) ->
 			  add_privacy_list(LUser, LServer, Name),
-			  {selected, [<<"id">>], [[I]]} =
+			  {selected, [{I}]} =
 			      get_privacy_list_id_t(LUser, LServer, Name),
 			  RItems = lists:map(fun item_to_raw/1, List),
 			  set_privacy_list(I, RItems),
@@ -287,7 +286,7 @@ raw_to_item({SType, SValue, SAction, Order, MatchAll,
                    match_presence_in = MatchPresenceIn,
                    match_presence_out = MatchPresenceOut}]
     catch _:_ ->
-            ?WARNING_MSG("failed to parse row: ~p", [Row]),
+            ?WARNING_MSG("Failed to parse row: ~p", [Row]),
             []
     end.
 

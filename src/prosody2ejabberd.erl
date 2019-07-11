@@ -55,7 +55,7 @@ from_dir(ProsodyDir) ->
 				      "privacy", "pep", "pubsub"])
 		      end, HostDirs);
 		{error, Why} = Err ->
-		    ?ERROR_MSG("failed to list ~s: ~s",
+		    ?ERROR_MSG("Failed to list ~s: ~s",
 			       [ProsodyDir, file:format_error(Why)]),
 		    Err
 	    end;
@@ -97,7 +97,7 @@ convert_dir(Path, Host, Type) ->
 	{error, enoent} ->
 	    ok;
 	{error, Why} = Err ->
-	    ?ERROR_MSG("failed to list ~s: ~s",
+	    ?ERROR_MSG("Failed to list ~s: ~s",
 		       [Path, file:format_error(Why)]),
 	    Err
     end.
@@ -119,11 +119,11 @@ eval_file(Path) ->
 		{ok, _} = Res ->
 		    Res;
 		{error, Why} = Err ->
-		    ?ERROR_MSG("failed to eval ~s: ~p", [Path, Why]),
+		    ?ERROR_MSG("Failed to eval ~s: ~p", [Path, Why]),
 		    Err
 	    end;
 	{error, Why} = Err ->
-	    ?ERROR_MSG("failed to read file ~s: ~s",
+	    ?ERROR_MSG("Failed to read file ~s: ~s",
 		       [Path, file:format_error(Why)]),
 	    Err
     end.
@@ -151,7 +151,7 @@ convert_data(Host, "accounts", User, [Data]) ->
 	ok ->
 	    ok;
 	Err ->
-	    ?ERROR_MSG("failed to register user ~s@~s: ~p",
+	    ?ERROR_MSG("Failed to register user ~s@~s: ~p",
 		       [User, Host, Err]),
 	    Err
     end;
@@ -198,7 +198,7 @@ convert_data(_Host, "config", _User, [Data]) ->
     RoomCfg = convert_room_config(Data),
     case proplists:get_bool(<<"persistent">>, Config) of
 	true when RoomJID /= error ->
-	    mod_muc:store_room(ejabberd_config:get_myname(), RoomJID#jid.lserver,
+	    mod_muc:store_room(find_serverhost(RoomJID#jid.lserver), RoomJID#jid.lserver,
 			       RoomJID#jid.luser, RoomCfg);
 	_ ->
 	    ok
@@ -272,12 +272,12 @@ convert_data(HostStr, "pubsub", Node, [Data]) ->
 			    Error
 		    end;
 		Error ->
-		    ?ERROR_MSG("failed to import pubsub node ~s on ~p:~n~p",
+		    ?ERROR_MSG("Failed to import pubsub node ~s on ~p:~n~p",
 			       [Node, Host, NodeData]),
 		    Error
 	    end;
 	Error ->
-	    ?ERROR_MSG("failed to import pubsub node: ~p", [Error]),
+	    ?ERROR_MSG("Failed to import pubsub node: ~p", [Error]),
 	    Error
     end;
 convert_data(_Host, _Type, _User, _Data) ->
@@ -521,6 +521,19 @@ el_to_offline_msg(LUser, LServer, #xmlel{attrs = Attrs} = El) ->
 	  _:{xmpp_codec, _} ->
 	    []
     end.
+
+find_serverhost(Host) ->
+    [ServerHost] =
+	lists:filter(
+	  fun(ServerHost) ->
+		  case gen_mod:is_loaded(ServerHost, mod_muc) of
+		      true ->
+			  lists:member(Host, gen_mod:get_module_opt_hosts(ServerHost, mod_muc));
+		      false ->
+			  false
+		  end
+	  end, ejabberd_option:hosts()),
+    ServerHost.
 
 deserialize(L) ->
     deserialize(L, #xmlel{}, []).

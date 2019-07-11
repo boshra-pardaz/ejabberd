@@ -37,12 +37,11 @@
 %%%----------------------------------------------------------------------
 
 -module(ejabberd_websocket).
-
 -protocol({rfc, 6455}).
 
 -author('ecestari@process-one.net').
 
--export([check/2, socket_handoff/5]).
+-export([socket_handoff/5]).
 
 -include("logger.hrl").
 
@@ -62,29 +61,39 @@
                           ?AC_ALLOW_HEADERS, ?AC_MAX_AGE]).
 -define(HEADER, [?CT_XML, ?AC_ALLOW_ORIGIN, ?AC_ALLOW_HEADERS]).
 
-check(_Path, Headers) ->
-    RequiredHeaders = [{'Upgrade', <<"websocket">>},
-                       {'Connection', ignore}, {'Host', ignore},
-                       {<<"Sec-Websocket-Key">>, ignore},
-                       {<<"Sec-Websocket-Version">>, <<"13">>},
-                       {<<"Origin">>, get_origin()}],
+is_valid_websocket_upgrade(_Path, Headers) ->
+    HeadersToValidate = [{'Upgrade', <<"websocket">>},
+                         {'Connection', ignore},
+                         {'Host', ignore},
+                         {<<"Sec-Websocket-Key">>, ignore},
+                         {<<"Sec-Websocket-Version">>, <<"13">>}],
+    Res = lists:all(
+        fun({Tag, Val}) ->
+            case lists:keyfind(Tag, 1, Headers) of
+                false ->
+                    false;
+                {_, _} when Val == ignore ->
+                    true;
+                {_, HVal} ->
+                    str:to_lower(HVal) == Val
+            end
+        end, HeadersToValidate),
 
-    F = fun ({Tag, Val}) ->
-		case lists:keyfind(Tag, 1, Headers) of
-		  false -> true; % header not found, keep in list
-		  {_, HVal} ->
-		      case Val of
-			ignore -> false; % ignore value -> ok, remove from list
-			_ ->
-			    % expected value -> ok, remove from list (false)
-			    % value is different, keep in list (true)
-			    str:to_lower(HVal) /= Val
-                      end
-                end
-        end,
-    case lists:filter(F, RequiredHeaders) of
-      [] -> true;
-      _MissingHeaders -> false
+    case {Res, lists:keyfind(<<"Origin">>, 1, Headers), get_origin()} of
+        {false, _, _} ->
+            false;
+        {true, _, []} ->
+            true;
+        {true, {_, HVal}, Origins} ->
+            HValLow = str:to_lower(HVal),
+            case lists:any(fun(V) -> V == HValLow end, Origins) of
+                true ->
+                    true;
+                _ ->
+                    invalid_origin
+            end;
+        {true, false, _} ->
+            true
     end.
 
 socket_handoff(LocalPath, #request{method = 'GET', ip = IP, q = Q, path = Path,
@@ -92,7 +101,7 @@ socket_handoff(LocalPath, #request{method = 'GET', ip = IP, q = Q, path = Path,
 				   socket = Socket, sockmod = SockMod,
 				   data = Buf, opts = HOpts},
                _Opts, HandlerModule, InfoMsgFun) ->
-    case check(LocalPath, Headers) of
+    case is_valid_websocket_upgrade(LocalPath, Headers) of
         true ->
             WS = #ws{socket = Socket,
                      sockmod = SockMod,
@@ -107,8 +116,11 @@ socket_handoff(LocalPath, #request{method = 'GET', ip = IP, q = Q, path = Path,
                      http_opts = HOpts},
 
             connect(WS, HandlerModule);
-        _ ->
-            {200, ?HEADER, InfoMsgFun()}
+        false ->
+            {200, ?HEADER, InfoMsgFun()};
+        invalid_origin ->
+            {403, ?HEADER, #xmlel{name = <<"h1">>,
+                                  children = [{xmlcdata, <<"403 Bad Request - Invalid origin">>}]}}
     end;
 socket_handoff(_, #request{method = 'OPTIONS'}, _, _, _) ->
     {200, ?OPTIONS_HEADER, []};
@@ -180,7 +192,7 @@ ws_loop(FrameInfo, Socket, WsHandleLoopPid, SocketMode) ->
         {DataType, _Socket, Data} when DataType =:= tcp orelse DataType =:= raw ->
             case handle_data(DataType, FrameInfo, Data, Socket, WsHandleLoopPid, SocketMode) of
                 {error, Error} ->
-                    ?DEBUG("tls decode error ~p", [Error]),
+                    ?DEBUG("TLS decode error ~p", [Error]),
                     websocket_close(Socket, WsHandleLoopPid, SocketMode, 1002); % protocol error
                 {NewFrameInfo, ToSend} ->
                     lists:foreach(fun(Pkt) -> SocketMode:send(Socket, Pkt)
@@ -188,22 +200,29 @@ ws_loop(FrameInfo, Socket, WsHandleLoopPid, SocketMode) ->
                     ws_loop(NewFrameInfo, Socket, WsHandleLoopPid, SocketMode)
             end;
         {tcp_closed, _Socket} ->
-            ?DEBUG("tcp connection was closed, exit", []),
+            ?DEBUG("TCP connection was closed, exit", []),
             websocket_close(Socket, WsHandleLoopPid, SocketMode, 0);
+	{tcp_error, Socket, Reason} ->
+	    ?DEBUG("TCP connection error: ~s", [inet:format_error(Reason)]),
+	    websocket_close(Socket, WsHandleLoopPid, SocketMode, 0);
         {'DOWN', Ref, process, WsHandleLoopPid, Reason} ->
             Code = case Reason of
                        normal ->
                            1000; % normal close
                        _ ->
-                           ?ERROR_MSG("linked websocket controlling loop crashed "
+                           ?ERROR_MSG("Linked websocket controlling loop crashed "
                                       "with reason: ~p",
                                       [Reason]),
                            1011 % internal error
                    end,
             erlang:demonitor(Ref),
             websocket_close(Socket, WsHandleLoopPid, SocketMode, Code);
-        {send, Data} ->
+        {text, Data} ->
             SocketMode:send(Socket, encode_frame(Data, 1)),
+            ws_loop(FrameInfo, Socket, WsHandleLoopPid,
+                    SocketMode);
+	{data, Data} ->
+	    SocketMode:send(Socket, encode_frame(Data, 2)),
             ws_loop(FrameInfo, Socket, WsHandleLoopPid,
                     SocketMode);
         {ping, Data} ->
@@ -211,12 +230,12 @@ ws_loop(FrameInfo, Socket, WsHandleLoopPid, SocketMode) ->
             ws_loop(FrameInfo, Socket, WsHandleLoopPid,
                     SocketMode);
         shutdown ->
-	  ?DEBUG("shutdown request received, closing websocket "
+	  ?DEBUG("Shutdown request received, closing websocket "
 		 "with pid ~p",
 		 [self()]),
             websocket_close(Socket, WsHandleLoopPid, SocketMode, 1001); % going away
         _Ignored ->
-            ?WARNING_MSG("received unexpected message, ignoring: ~p",
+            ?WARNING_MSG("Received unexpected message, ignoring: ~p",
                          [_Ignored]),
             ws_loop(FrameInfo, Socket, WsHandleLoopPid,
                     SocketMode)
@@ -409,4 +428,4 @@ websocket_close(Socket, WsHandleLoopPid, SocketMode, _CloseCode) ->
     SocketMode:close(Socket).
 
 get_origin() ->
-    ejabberd_config:get_option({websocket_origin, ejabberd_config:get_myname()}, ignore).
+    ejabberd_option:websocket_origin().
